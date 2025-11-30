@@ -1,0 +1,45 @@
+# Task Router Service
+# Continuously polls PostgreSQL for unsolved tasks and routes to model-specific Redis queues
+
+SERVICE TaskRouter:
+    
+    LOOP forever:
+        # 1. Fetch unsolved tasks with row-level locking (prevents duplicate processing)
+        tasks = DB.query("""
+            SELECT id, prompt, priority FROM tasks
+            WHERE status = 'unsolved'
+            ORDER BY priority ASC, created_at ASC
+            LIMIT 100
+            FOR UPDATE SKIP LOCKED
+        """)
+        
+        IF tasks.empty:
+            SLEEP(100ms)
+            CONTINUE
+        
+        # 2. Route each task to appropriate model queue
+        FOR task IN tasks:
+            model = select_model_weighted(get_model_config())
+            
+            # Update DB status
+            DB.execute("""
+                UPDATE tasks 
+                SET status = 'queued', assigned_model = $model
+                WHERE id = $task.id
+            """)
+            
+            # Push to model-specific Redis queue
+            REDIS.LPUSH("queue:model:{model.id}", {task_id, priority, queued_at})
+
+
+FUNCTION select_model_weighted(models):
+    # Weighted random selection based on traffic_percentage
+    # Queue depth penalty: models with deeper queues get less traffic
+    
+    weights = {}
+    FOR model IN models WHERE model.enabled:
+        queue_depth = REDIS.LLEN("queue:model:{model.id}")
+        penalty = MIN(queue_depth / 100, 0.5)  # Max 50% reduction
+        weights[model] = model.traffic_percentage * (1 - penalty)
+    
+    RETURN weighted_random_choice(weights)

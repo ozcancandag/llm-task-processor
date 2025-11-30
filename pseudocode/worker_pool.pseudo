@@ -1,0 +1,43 @@
+# Worker Pool Service
+# One instance per model. Consumes from Redis queue, calls /single endpoint.
+
+SERVICE WorkerPool(model_id):
+    
+    # Dynamic scaling: 2-20 workers based on queue depth
+    min_workers = 2
+    max_workers = 20
+    
+    LOOP forever:
+        # Scale workers based on queue depth
+        queue_depth = REDIS.LLEN("queue:model:{model_id}")
+        target_workers = CLAMP(queue_depth / 10, min_workers, max_workers)
+        adjust_worker_count(target_workers)
+        
+        SLEEP(5s)
+
+
+ASYNC FUNCTION worker_loop():
+    LOOP forever:
+        # Blocking pop with 5s timeout
+        task = REDIS.BRPOP("queue:model:{model_id}", timeout=5)
+        IF task IS NULL:
+            CONTINUE
+        
+        # Rate limit check
+        IF NOT rate_limiter.acquire():
+            REDIS.LPUSH(queue, task)  # Re-queue
+            SLEEP(100ms)
+            CONTINUE
+        
+        # Mark as processing
+        DB.execute("UPDATE tasks SET status='processing', attempts=attempts+1 WHERE id=$task.id")
+        
+        # Call /single endpoint (1s - 120s response time)
+        TRY:
+            response = HTTP.POST("/single", {prompt: task.prompt, model: model_id})
+            DB.execute("UPDATE tasks SET status='solved', answer=$response.answer WHERE id=$task.id")
+        CATCH error:
+            IF task.attempts >= 3:
+                DB.execute("UPDATE tasks SET status='failed', error=$error WHERE id=$task.id")
+            ELSE:
+                DB.execute("UPDATE tasks SET status='unsolved' WHERE id=$task.id")  # Retry

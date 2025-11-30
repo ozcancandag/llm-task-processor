@@ -1,0 +1,29 @@
+# Config Manager
+# Hot-reloadable configuration via Redis with pub/sub notifications
+
+CLASS ConfigManager:
+    cache = NULL
+    cache_ttl = 5s
+    
+    FUNCTION get_models() -> List[ModelConfig]:
+        # Check cache first
+        IF cache IS VALID:
+            RETURN cache
+        
+        # Try Redis, fallback to DB
+        config = REDIS.GET("config:models") OR DB.query("SELECT * FROM model_config")
+        cache = config
+        RETURN config
+    
+    FUNCTION update_traffic(model_id, percentage):
+        DB.execute("UPDATE model_config SET traffic_percentage=$pct WHERE model_id=$id")
+        REDIS.DEL("config:models")  # Invalidate cache
+        REDIS.PUBLISH("config:updates", {model_id, traffic_percentage})  # Notify all services
+    
+    FUNCTION subscribe_to_updates():
+        # All services subscribe to config changes
+        REDIS.SUBSCRIBE("config:updates", callback=on_config_change)
+    
+    FUNCTION on_config_change(update):
+        cache = NULL  # Invalidate local cache
+        LOG("Config updated: {update}")

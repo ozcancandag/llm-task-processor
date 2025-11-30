@@ -1,0 +1,27 @@
+# Recovery Job
+# Cron job (every 5 min) to detect and recover stuck tasks
+
+JOB StuckTaskRecovery:
+    stuck_threshold = 5 minutes
+    max_retries = 3
+    
+    FUNCTION run():
+        # Find tasks stuck in 'processing' state
+        stuck = DB.query("""
+            SELECT id, attempts FROM tasks
+            WHERE status = 'processing'
+              AND last_attempt_at < NOW() - INTERVAL '5 minutes'
+        """)
+        
+        FOR task IN stuck:
+            IF task.attempts < max_retries:
+                # Reset for retry
+                DB.execute("UPDATE tasks SET status='unsolved', assigned_model=NULL WHERE id=$id")
+                REDIS.LREM("queue:model:*", task.id)  # Remove from any queue
+            ELSE:
+                # Permanently failed
+                DB.execute("UPDATE tasks SET status='failed', error='Max retries exceeded' WHERE id=$id")
+        
+        # Alert if too many stuck
+        IF stuck.count > 10:
+            ALERT("High stuck task count: {stuck.count}")

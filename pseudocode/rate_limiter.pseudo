@@ -1,0 +1,33 @@
+# Rate Limiter
+# Token bucket algorithm using Redis + Lua for atomic operations
+
+CLASS RateLimiter(model_id, capacity=20, refill_rate=10):
+    
+    # Lua script for atomic token bucket (runs in Redis)
+    LUA_SCRIPT = """
+        local tokens = redis.call('HGET', key, 'tokens') or capacity
+        local last = redis.call('HGET', key, 'last_refill') or now
+        
+        -- Refill tokens based on elapsed time
+        tokens = MIN(capacity, tokens + (now - last) * refill_rate)
+        
+        -- Try to acquire
+        if tokens >= 1 then
+            redis.call('HMSET', key, 'tokens', tokens - 1, 'last_refill', now)
+            return 1  -- Success
+        end
+        return 0  -- Rate limited
+    """
+    
+    FUNCTION acquire() -> bool:
+        result = REDIS.EVAL(LUA_SCRIPT, key="ratelimit:{model_id}", args=[capacity, refill_rate, NOW])
+        RETURN result == 1
+    
+    FUNCTION wait_for_token(max_wait=30s) -> bool:
+        # Exponential backoff until token available or timeout
+        wait = 100ms
+        WHILE elapsed < max_wait:
+            IF acquire(): RETURN TRUE
+            SLEEP(wait)
+            wait = MIN(wait * 1.5, 2s)
+        RETURN FALSE
